@@ -1,4 +1,3 @@
-
 package com.example.sampleapp
 
 import android.app.Activity
@@ -8,9 +7,11 @@ import android.graphics.Typeface
 import android.view.Gravity
 import android.view.View
 import android.widget.*
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 class MainActivity : Activity() {
     private val bg = Color.rgb(8, 11, 10)
@@ -21,19 +22,26 @@ class MainActivity : Activity() {
     private val apiUrl = "https://detnolugerkqfinwvstt.supabase.co"
     private val apiKey = "sb_publishable_turDf0jb5YO33DrUx3k-hA_Oj88A7Oh"
 
+    private var token = ""
+    private var myId = ""
+    private var myEmail = ""
+    private var chatId = ""
+    private var chatName = ""
     private lateinit var page: LinearLayout
-    private lateinit var email: EditText
-    private lateinit var password: EditText
     private lateinit var status: TextView
+    private lateinit var messageInput: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = bg
         window.navigationBarColor = bg
 
-        if (getSharedPreferences("nexa", MODE_PRIVATE)
-                .getString("token", null) != null) {
-            showHome()
+        val prefs = getSharedPreferences("nexa", MODE_PRIVATE)
+        token = prefs.getString("token", "") ?: ""
+        myEmail = prefs.getString("email", "") ?: ""
+
+        if (token.isNotEmpty()) {
+            loadProfileAndUsers()
         } else {
             showLogin()
         }
@@ -42,204 +50,491 @@ class MainActivity : Activity() {
     private fun makePage(): LinearLayout {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 35, 24, 24)
+            setPadding(20, 24, 20, 20)
             setBackgroundColor(bg)
         }
     }
 
-    private fun label(value: String, size: Float, color: Int): TextView {
-        return TextView(this).apply {
-            text = value
-            textSize = size
-            setTextColor(color)
-            setPadding(8, 12, 8, 12)
-        }
+    private fun label(
+        value: String,
+        size: Float = 16f,
+        color: Int = Color.WHITE
+    ) = TextView(this).apply {
+        text = value
+        textSize = size
+        setTextColor(color)
+        setPadding(8, 10, 8, 10)
     }
 
-    private fun field(hintText: String, secret: Boolean = false): EditText {
-        return EditText(this).apply {
-            hint = hintText
-            setHintTextColor(muted)
-            setTextColor(Color.WHITE)
-            textSize = 16f
-            setSingleLine(true)
-            if (secret) {
-                inputType = 129
-            } else {
-                inputType = 33
-            }
-            setPadding(16, 12, 16, 12)
-            setBackgroundColor(panel)
-            val params = LinearLayout.LayoutParams(
-                -1, -2
-            )
-            params.setMargins(0, 7, 0, 7)
-            layoutParams = params
+    private fun field(
+        hintText: String,
+        secret: Boolean = false
+    ) = EditText(this).apply {
+        hint = hintText
+        setHintTextColor(muted)
+        setTextColor(Color.WHITE)
+        textSize = 16f
+        setSingleLine(true)
+        inputType = if (secret) 129 else 33
+        setPadding(14, 12, 14, 12)
+        setBackgroundColor(panel)
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply {
+            setMargins(0, 6, 0, 6)
         }
     }
 
     private fun action(
         value: String,
         callback: () -> Unit
-    ): TextView {
-        return label(value, 16f, neon).apply {
-            gravity = Gravity.CENTER
-            setTypeface(null, Typeface.BOLD)
-            setBackgroundColor(panel)
-            setOnClickListener { callback() }
-            val params = LinearLayout.LayoutParams(-1, -2)
-            params.setMargins(0, 7, 0, 7)
-            layoutParams = params
+    ) = TextView(this).apply {
+        text = value
+        textSize = 16f
+        setTextColor(neon)
+        gravity = Gravity.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+        setPadding(12, 14, 12, 14)
+        setBackgroundColor(panel)
+        setOnClickListener { callback() }
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply {
+            setMargins(0, 5, 0, 5)
+        }
+    }
+
+    private fun runTask(task: () -> Unit) {
+        Thread {
+            try {
+                task()
+            } catch (e: Exception) {
+                runOnUiThread {
+                    status.text = "خطا: ${e.message ?: "اتصال ناموفق"}"
+                }
+            }
+        }.start()
+    }
+
+    private fun request(
+        path: String,
+        method: String = "GET",
+        body: String? = null,
+        authenticated: Boolean = true,
+        prefer: String? = null
+    ): String {
+        val conn = (URL("$apiUrl$path").openConnection()
+                as HttpURLConnection)
+
+        try {
+            conn.requestMethod = method
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            conn.setRequestProperty("apikey", apiKey)
+            conn.setRequestProperty("Accept", "application/json")
+
+            if (authenticated && token.isNotEmpty()) {
+                conn.setRequestProperty(
+                    "Authorization", "Bearer $token"
+                )
+            }
+
+            if (body != null) {
+                conn.doOutput = true
+                conn.setRequestProperty(
+                    "Content-Type", "application/json"
+                )
+                conn.outputStream.use {
+                    it.write(body.toByteArray(Charsets.UTF_8))
+                }
+            }
+
+            if (prefer != null) {
+                conn.setRequestProperty("Prefer", prefer)
+            }
+
+            val code = conn.responseCode
+            val stream = if (code in 200..299) {
+                conn.inputStream
+            } else {
+                conn.errorStream
+            }
+
+            val result = stream?.bufferedReader()
+                ?.use { it.readText() } ?: ""
+
+            if (code !in 200..299) {
+                val message = try {
+                    val j = JSONObject(result)
+                    j.optString(
+                        "message",
+                        j.optString(
+                            "msg",
+                            j.optString(
+                                "error_description",
+                                "HTTP $code"
+                            )
+                        )
+                    )
+                } catch (_: Exception) {
+                    "HTTP $code: $result"
+                }
+                throw Exception(message)
+            }
+
+            return result
+        } finally {
+            conn.disconnect()
         }
     }
 
     private fun showLogin() {
         page = makePage()
         page.addView(label("NEXA", 34f, neon))
-        page.addView(label("پیام‌رسان تو؛ ارتباطی ساده و امن", 15f, muted))
-        page.addView(label("ورود یا ساخت حساب", 22f, Color.WHITE))
+        page.addView(label("پیام‌رسان تو", 16f, muted))
+        page.addView(label("ورود یا ساخت حساب", 22f))
 
-        email = field("ایمیل", false)
-        password = field("رمز عبور (حداقل ۶ کاراکتر)", true)
+        val email = field("ایمیل")
+        val password = field("رمز عبور", true)
+        status = label("", 14f, neon)
+
         page.addView(email)
         page.addView(password)
-
-        status = label("", 14f, neon)
         page.addView(status)
 
         page.addView(action("ورود به حساب") {
-            authenticate(false)
+            authenticate(email.text.toString().trim(),
+                password.text.toString(), false)
         })
+
         page.addView(action("ساخت حساب جدید") {
-            authenticate(true)
+            authenticate(email.text.toString().trim(),
+                password.text.toString(), true)
         })
-        page.addView(label(
-            "برای ساخت حساب، از ایمیل واقعی استفاده کن.",
-            13f, muted
-        ))
+
         setContentView(page)
     }
 
-    private fun authenticate(register: Boolean) {
-        val mail = email.text.toString().trim()
-        val pass = password.text.toString()
-
-        if (!android.util.Patterns.EMAIL_ADDRESS.matcher(mail).matches()) {
+    private fun authenticate(
+        mail: String,
+        pass: String,
+        register: Boolean
+    ) {
+        if (!android.util.Patterns.EMAIL_ADDRESS
+                .matcher(mail).matches()) {
             status.text = "ایمیل را درست وارد کن."
             return
         }
+
         if (pass.length < 6) {
             status.text = "رمز عبور باید حداقل ۶ کاراکتر باشد."
             return
         }
 
-        status.text = "در حال اتصال امن به NEXA..."
+        status.text = "در حال اتصال..."
 
-        Thread {
-            try {
-                val endpoint = if (register) {
-                    "$apiUrl/auth/v1/signup"
-                } else {
-                    "$apiUrl/auth/v1/token?grant_type=password"
-                }
+        runTask {
+            val path = if (register) {
+                "/auth/v1/signup"
+            } else {
+                "/auth/v1/token?grant_type=password"
+            }
 
-                val body = JSONObject().apply {
-                    put("email", mail)
-                    put("password", pass)
-                }
+            val body = JSONObject().apply {
+                put("email", mail)
+                put("password", pass)
+            }
 
-                val response = request(endpoint, body)
-                val json = JSONObject(response)
-                val token = json.optString("access_token")
-                val user = json.optJSONObject("user")
-                val userEmail = user?.optString("email", mail) ?: mail
+            val response = JSONObject(
+                request(path, "POST", body.toString(), false)
+            )
 
+            val newToken = response.optString("access_token")
+            val user = response.optJSONObject("user")
+
+            if (newToken.isNotEmpty()) {
+                token = newToken
+                myEmail = user?.optString("email", mail) ?: mail
+
+                getSharedPreferences("nexa", MODE_PRIVATE)
+                    .edit()
+                    .putString("token", token)
+                    .putString("email", myEmail)
+                    .apply()
+
+                loadProfileAndUsers()
+            } else {
                 runOnUiThread {
-                    if (token.isNotEmpty()) {
-                        getSharedPreferences("nexa", MODE_PRIVATE)
-                            .edit()
-                            .putString("token", token)
-                            .putString("email", userEmail)
-                            .apply()
-                        showHome()
-                    } else if (register) {
-                        status.text =
-                            "حساب درخواست شد. ایمیلت را برای تأیید بررسی کن، سپس وارد شو."
+                    status.text = if (register) {
+                        "حساب ساخته شد؛ ایمیلت را تأیید کن و سپس وارد شو."
                     } else {
-                        status.text = "ورود انجام نشد؛ دوباره تلاش کن."
+                        "ورود انجام نشد."
                     }
                 }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    status.text = "خطا: ${e.message ?: "اتصال برقرار نشد"}"
-                }
             }
-        }.start()
+        }
     }
 
-    private fun request(endpoint: String, body: JSONObject): String {
-        val connection = URL(endpoint).openConnection() as HttpURLConnection
-        connection.requestMethod = "POST"
-        connection.connectTimeout = 15000
-        connection.readTimeout = 15000
-        connection.doOutput = true
-        connection.setRequestProperty("apikey", apiKey)
-        connection.setRequestProperty("Content-Type", "application/json")
-        connection.setRequestProperty("Accept", "application/json")
+    private fun loadProfileAndUsers() {
+        runTask {
+            val user = JSONObject(
+                request("/auth/v1/user")
+            )
+            myId = user.optString("id")
+            myEmail = user.optString("email", myEmail)
 
-        connection.outputStream.use {
-            it.write(body.toString().toByteArray(Charsets.UTF_8))
-        }
+            if (myId.isEmpty()) {
+                throw Exception("شناسه حساب پیدا نشد.")
+            }
 
-        val code = connection.responseCode
-        val stream = if (code in 200..299) {
-            connection.inputStream
-        } else {
-            connection.errorStream
-        }
-
-        val result = stream?.bufferedReader()?.use { it.readText() } ?: ""
-        connection.disconnect()
-
-        if (code !in 200..299) {
-            val message = try {
-                val error = JSONObject(result)
-                error.optString(
-                    "msg",
-                    error.optString(
-                        "message",
-                        error.optString("error_description", "درخواست ناموفق بود")
-                    )
+            val suffix = myId.replace("-", "").take(6)
+            val username = (
+                myEmail.substringBefore("@")
+                    .lowercase()
+                    .replace(Regex("[^a-z0-9_]"), "_")
+                    .take(18) + "_" + suffix
                 )
-            } catch (_: Exception) {
-                "درخواست ناموفق بود (HTTP $code)"
+
+            val profile = JSONObject().apply {
+                put("id", myId)
+                put("username", username)
+                put("display_name", myEmail.substringBefore("@"))
             }
-            throw Exception(message)
+
+            request(
+                "/rest/v1/profiles?on_conflict=id",
+                "POST",
+                profile.toString(),
+                true,
+                "resolution=merge-duplicates,return=minimal"
+            )
+
+            val users = JSONArray(
+                request(
+                    "/rest/v1/profiles" +
+                    "?select=id,username,display_name" +
+                    "&order=created_at.desc"
+                )
+            )
+
+            runOnUiThread {
+                showUsers(users)
+            }
         }
-        return result
     }
 
-    private fun showHome() {
-        val mail = getSharedPreferences("nexa", MODE_PRIVATE)
-            .getString("email", "") ?: ""
-
+    private fun showUsers(users: JSONArray) {
         page = makePage()
-        page.addView(label("NEXA", 34f, neon))
-        page.addView(label("خوش آمدی!", 25f, Color.WHITE))
-        page.addView(label(mail, 15f, muted))
-        page.addView(label(
-            "حساب تو به Supabase متصل شده است.",
-            16f, neon
-        ))
-        page.addView(label(
-            "مرحله بعد: ساخت گفت‌وگوهای واقعی و ارسال پیام بین کاربران.",
-            15f, Color.WHITE
-        ))
+        page.addView(label("NEXA", 32f, neon))
+        page.addView(label("کاربران پیام‌رسان", 22f))
+        page.addView(label(myEmail, 14f, muted))
+
+        status = label("", 14f, neon)
+        page.addView(status)
+
+        page.addView(action("به‌روزرسانی فهرست") {
+            loadProfileAndUsers()
+        })
+
+        var count = 0
+
+        for (i in 0 until users.length()) {
+            val u = users.getJSONObject(i)
+            val id = u.optString("id")
+            if (id == myId) continue
+
+            val name = u.optString("display_name")
+                .ifBlank { u.optString("username", "کاربر NEXA") }
+
+            page.addView(action("●  $name\nشروع گفت‌وگو") {
+                openConversation(id, name)
+            })
+            count++
+        }
+
+        if (count == 0) {
+            page.addView(label(
+                "فعلاً کاربر دیگری ثبت‌نام نکرده است.",
+                15f, muted
+            ))
+            page.addView(label(
+                "برای آزمایش پیام‌رسان، حساب دوم را با ایمیل دیگری بساز.",
+                14f, muted
+            ))
+        }
+
         page.addView(action("خروج از حساب") {
             getSharedPreferences("nexa", MODE_PRIVATE)
                 .edit().clear().apply()
+            token = ""
+            myId = ""
             showLogin()
         })
+
         setContentView(page)
+    }
+
+    private fun openConversation(
+        otherId: String,
+        otherName: String
+    ) {
+        status.text = "در حال ساخت گفت‌وگو..."
+
+        runTask {
+            val conversation = JSONObject().apply {
+                put("created_by", myId)
+                put("is_group", false)
+                put("title", otherName)
+            }
+
+            val result = JSONArray(
+                request(
+                    "/rest/v1/conversations",
+                    "POST",
+                    conversation.toString(),
+                    true,
+                    "return=representation"
+                )
+            )
+
+            val conversationId = result
+                .getJSONObject(0).getString("id")
+
+            val members = JSONArray()
+            members.put(JSONObject().apply {
+                put("conversation_id", conversationId)
+                put("user_id", myId)
+            })
+            members.put(JSONObject().apply {
+                put("conversation_id", conversationId)
+                put("user_id", otherId)
+            })
+
+            request(
+                "/rest/v1/conversation_members",
+                "POST",
+                members.toString(),
+                true,
+                "return=minimal"
+            )
+
+            chatId = conversationId
+            chatName = otherName
+
+            runOnUiThread {
+                showChat()
+                loadMessages()
+            }
+        }
+    }
+
+    private fun showChat() {
+        page = makePage()
+        page.addView(label("NEXA  /  گفت‌وگو", 26f, neon))
+        page.addView(label(chatName, 21f))
+
+        page.addView(action("بازگشت به کاربران") {
+            loadProfileAndUsers()
+        })
+
+        page.addView(action("به‌روزرسانی پیام‌ها") {
+            loadMessages()
+        })
+
+        val scroll = ScrollView(this)
+        val messages = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        messages.tag = "messages"
+        scroll.addView(messages)
+
+        page.addView(
+            scroll,
+            LinearLayout.LayoutParams(-1, 0, 1f)
+        )
+
+        messageInput = field("پیامت را بنویس...")
+        page.addView(messageInput)
+
+        page.addView(action("ارسال پیام") {
+            sendMessage()
+        })
+
+        status = label("", 13f, neon)
+        page.addView(status)
+
+        setContentView(page)
+    }
+
+    private fun loadMessages() {
+        if (chatId.isEmpty()) return
+
+        runTask {
+            val encoded = URLEncoder.encode(chatId, "UTF-8")
+            val data = JSONArray(
+                request(
+                    "/rest/v1/messages" +
+                    "?conversation_id=eq.$encoded" +
+                    "&select=id,sender_id,body,created_at" +
+                    "&order=created_at.asc"
+                )
+            )
+
+            runOnUiThread {
+                val scroll = page.getChildAt(3) as? ScrollView
+                    ?: return@runOnUiThread
+                val list = scroll.getChildAt(0) as? LinearLayout
+                    ?: return@runOnUiThread
+
+                list.removeAllViews()
+
+                for (i in 0 until data.length()) {
+                    val m = data.getJSONObject(i)
+                    val mine = m.optString("sender_id") == myId
+                    val text = m.optString("body")
+
+                    list.addView(label(
+                        (if (mine) "شما: " else "$chatName: ") + text,
+                        15f,
+                        if (mine) neon else Color.WHITE
+                    ).apply {
+                        setBackgroundColor(panel)
+                    })
+                }
+
+                status.text = "${data.length()} پیام"
+            }
+        }
+    }
+
+    private fun sendMessage() {
+        val text = messageInput.text.toString().trim()
+
+        if (text.isEmpty()) return
+        if (text.length > 5000) {
+            status.text = "پیام بیش از حد طولانی است."
+            return
+        }
+
+        val body = JSONObject().apply {
+            put("conversation_id", chatId)
+            put("sender_id", myId)
+            put("body", text)
+        }
+
+        status.text = "در حال ارسال..."
+
+        runTask {
+            request(
+                "/rest/v1/messages",
+                "POST",
+                body.toString(),
+                true,
+                "return=minimal"
+            )
+
+            runOnUiThread {
+                messageInput.text.clear()
+                status.text = "پیام ارسال شد."
+                loadMessages()
+            }
+        }
     }
 }
