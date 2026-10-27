@@ -41,10 +41,15 @@ class MainActivity : Activity() {
         myEmail = prefs.getString("email", "") ?: ""
 
         if (token.isNotEmpty()) {
-            loadProfileAndUsers()
-        } else {
-            showLogin()
-        }
+    page = makePage()
+    status = label("در حال اتصال به NEXA...", 14f, neon)
+    page.addView(label("NEXA", 32f, neon))
+    page.addView(status)
+    setContentView(page)
+    loadProfileAndUsers()
+} else {
+    showLogin()
+}
     }
 
     private fun makePage(): LinearLayout {
