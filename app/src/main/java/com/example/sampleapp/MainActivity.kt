@@ -41,15 +41,15 @@ class MainActivity : Activity() {
         myEmail = prefs.getString("email", "") ?: ""
 
         if (token.isNotEmpty()) {
-    page = makePage()
-    status = label("در حال اتصال به NEXA...", 14f, neon)
-    page.addView(label("NEXA", 32f, neon))
-    page.addView(status)
-    setContentView(page)
-    loadProfileAndUsers()
-} else {
-    showLogin()
-}
+            page = makePage()
+            status = label("در حال اتصال به NEXA...", 14f, neon)
+            page.addView(label("NEXA", 32f, neon))
+            page.addView(status)
+            setContentView(page)
+            loadProfileAndUsers()
+        } else {
+            showLogin()
+        }
     }
 
     private fun makePage(): LinearLayout {
@@ -111,7 +111,11 @@ class MainActivity : Activity() {
                 task()
             } catch (e: Exception) {
                 runOnUiThread {
-                    status.text = "خطا: ${e.message ?: "اتصال ناموفق"}"
+                    if (::status.isInitialized) {
+                        status.text = "خطا: ${e.message ?: "اتصال ناموفق"}"
+                    } else {
+                        showLogin()
+                    }
                 }
             }
         }.start()
@@ -140,6 +144,10 @@ class MainActivity : Activity() {
                 )
             }
 
+            if (prefer != null) {
+                conn.setRequestProperty("Prefer", prefer)
+            }
+
             if (body != null) {
                 conn.doOutput = true
                 conn.setRequestProperty(
@@ -148,10 +156,6 @@ class MainActivity : Activity() {
                 conn.outputStream.use {
                     it.write(body.toByteArray(Charsets.UTF_8))
                 }
-            }
-
-            if (prefer != null) {
-                conn.setRequestProperty("Prefer", prefer)
             }
 
             val code = conn.responseCode
@@ -275,8 +279,7 @@ class MainActivity : Activity() {
             }
         }
     }
-
-    private fun loadProfileAndUsers() {
+        private fun loadProfileAndUsers() {
         runTask {
             val user = JSONObject(
                 request("/auth/v1/user")
@@ -483,7 +486,7 @@ class MainActivity : Activity() {
             )
 
             runOnUiThread {
-                val scroll = page.getChildAt(3) as? ScrollView
+                val scroll = page.getChildAt(4) as? ScrollView
                     ?: return@runOnUiThread
                 val list = scroll.getChildAt(0) as? LinearLayout
                     ?: return@runOnUiThread
