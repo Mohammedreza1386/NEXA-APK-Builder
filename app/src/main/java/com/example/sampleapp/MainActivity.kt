@@ -633,10 +633,10 @@ class MainActivity : Activity() {
 
         chatScroll.addView(
             messageList,
-            ScrollView.LayoutParams(
-                -1,
-                -2
-            )
+          LinearLayout.LayoutParams(
+    -1,
+    -2
+)
         )
 
         page.addView(
