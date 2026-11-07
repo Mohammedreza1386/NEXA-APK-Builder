@@ -4,6 +4,7 @@ import android.app.Activity
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.net.Uri
 import android.graphics.Color
 import android.graphics.Typeface
 import android.view.Gravity
@@ -29,6 +30,8 @@ class MainActivity : Activity() {
         "sb_publishable_turDf0jb5YO33DrUx3k-hA_Oj88A7Oh"
 
     private var token = ""
+    private var refreshToken = ""
+    private var pendingAuthMessage = ""
     private var myId = ""
     private var myEmail = ""
     private var chatId = ""
@@ -50,7 +53,11 @@ class MainActivity : Activity() {
 
         val prefs = getSharedPreferences("nexa", MODE_PRIVATE)
         token = prefs.getString("token", "") ?: ""
+        refreshToken = prefs.getString("refresh_token", "") ?: ""
         myEmail = prefs.getString("email", "") ?: ""
+
+        // اگر برنامه از لینک تأیید ایمیل باز شده باشد، توکن‌های جدید جایگزین می‌شوند.
+        handleAuthCallback(intent)
 
         if (token.isNotEmpty()) {
             page = makePage()
@@ -61,6 +68,22 @@ class MainActivity : Activity() {
             loadProfileAndUsers()
         } else {
             showLogin()
+            if (pendingAuthMessage.isNotEmpty()) {
+                status.text = pendingAuthMessage
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+
+        if (handleAuthCallback(intent)) {
+            if (token.isNotEmpty()) {
+                loadProfileAndUsers()
+            } else if (::status.isInitialized) {
+                status.text = pendingAuthMessage
+            }
         }
     }
 
@@ -156,7 +179,8 @@ class MainActivity : Activity() {
         method: String = "GET",
         body: String? = null,
         authenticated: Boolean = true,
-        prefer: String? = null
+        prefer: String? = null,
+        retryAuth: Boolean = true
     ): String {
         val conn = URL("$apiUrl$path")
             .openConnection() as HttpURLConnection
@@ -192,6 +216,26 @@ class MainActivity : Activity() {
             }
 
             val code = conn.responseCode
+
+            // در صورت انقضای access token، یک بار آن را تمدید و درخواست را تکرار می‌کنیم.
+            if (code == 401 &&
+                authenticated &&
+                retryAuth &&
+                refreshToken.isNotEmpty()
+            ) {
+                conn.disconnect()
+                if (refreshSession()) {
+                    return request(
+                        path,
+                        method,
+                        body,
+                        authenticated,
+                        prefer,
+                        false
+                    )
+                }
+            }
+
             val stream = if (code in 200..299) {
                 conn.inputStream
             } else {
@@ -226,7 +270,110 @@ class MainActivity : Activity() {
             conn.disconnect()
         }
     }
-        private fun showLogin() {
+
+    @Synchronized
+    private fun refreshSession(): Boolean {
+        val oldRefreshToken = refreshToken
+        if (oldRefreshToken.isBlank()) return false
+
+        return try {
+            val body = JSONObject().apply {
+                put("refresh_token", oldRefreshToken)
+            }
+
+            val response = JSONObject(
+                request(
+                    "/auth/v1/token?grant_type=refresh_token",
+                    "POST",
+                    body.toString(),
+                    false,
+                    null,
+                    false
+                )
+            )
+
+            val newAccessToken = response.optString("access_token")
+            val newRefreshToken = response.optString("refresh_token")
+
+            if (newAccessToken.isBlank() || newRefreshToken.isBlank()) {
+                return false
+            }
+
+            token = newAccessToken
+            refreshToken = newRefreshToken
+
+            getSharedPreferences("nexa", MODE_PRIVATE)
+                .edit()
+                .putString("token", token)
+                .putString("refresh_token", refreshToken)
+                .putString("email", myEmail)
+                .apply()
+
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun saveSession(
+        access: String,
+        refresh: String,
+        email: String
+    ) {
+        token = access
+        if (refresh.isNotBlank()) {
+            refreshToken = refresh
+        }
+        myEmail = email
+
+        getSharedPreferences("nexa", MODE_PRIVATE)
+            .edit()
+            .putString("token", token)
+            .putString("refresh_token", refreshToken)
+            .putString("email", myEmail)
+            .apply()
+    }
+
+    private fun handleAuthCallback(callbackIntent: android.content.Intent): Boolean {
+        val data = callbackIntent.data ?: return false
+        if (data.scheme != "nexa" || data.host != "auth-callback") {
+            return false
+        }
+
+        try {
+            // Supabase معمولاً توکن‌های تأیید را در fragment قرار می‌دهد.
+            val fragmentParams = data.fragment
+                ?.let { Uri.parse("https://callback.invalid/?$it") }
+
+            val access = fragmentParams?.getQueryParameter("access_token")
+                ?: data.getQueryParameter("access_token")
+                ?: ""
+            val refresh = fragmentParams?.getQueryParameter("refresh_token")
+                ?: data.getQueryParameter("refresh_token")
+                ?: ""
+
+            val errorDescription =
+                fragmentParams?.getQueryParameter("error_description")
+                    ?: data.getQueryParameter("error_description")
+                    ?: data.getQueryParameter("error")
+
+            if (access.isNotBlank()) {
+                saveSession(access, refresh, myEmail)
+                pendingAuthMessage = "ایمیل تأیید شد؛ در حال ورود به NEXA..."
+            } else {
+                pendingAuthMessage = errorDescription
+                    ?.replace("+", " ")
+                    ?.let { "تأیید ایمیل انجام نشد: $it" }
+                    ?: "لینک تأیید دریافت شد، اما توکن ورود در آن نبود. دوباره ایمیل تأیید را باز کن."
+            }
+        } catch (e: Exception) {
+            pendingAuthMessage = "خواندن لینک تأیید ناموفق بود: ${e.message}"
+        }
+
+        return true
+    }
+
+    private fun showLogin() {
         stopAutoRefresh()
         screen = "login"
 
@@ -281,8 +428,13 @@ class MainActivity : Activity() {
         status.text = "در حال اتصال..."
 
         runTask {
+            val redirect = URLEncoder.encode(
+                "nexa://auth-callback",
+                "UTF-8"
+            )
+
             val path = if (register) {
-                "/auth/v1/signup"
+                "/auth/v1/signup?redirect_to=$redirect"
             } else {
                 "/auth/v1/token?grant_type=password"
             }
@@ -297,18 +449,12 @@ class MainActivity : Activity() {
             )
 
             val newToken = response.optString("access_token")
+            val newRefreshToken = response.optString("refresh_token")
             val user = response.optJSONObject("user")
 
             if (newToken.isNotEmpty()) {
-                token = newToken
-                myEmail = user?.optString("email", mail) ?: mail
-
-                getSharedPreferences("nexa", MODE_PRIVATE)
-                    .edit()
-                    .putString("token", token)
-                    .putString("email", myEmail)
-                    .apply()
-
+                val returnedEmail = user?.optString("email", mail) ?: mail
+                saveSession(newToken, newRefreshToken, returnedEmail)
                 loadProfileAndUsers()
             } else {
                 runOnUiThread {
@@ -365,8 +511,7 @@ class MainActivity : Activity() {
             }
         }
     }
-
-    private fun showUsers(users: JSONArray) {
+        private fun showUsers(users: JSONArray) {
         stopAutoRefresh()
         screen = "users"
 
@@ -429,6 +574,7 @@ class MainActivity : Activity() {
                 .edit().clear().apply()
 
             token = ""
+            refreshToken = ""
             myId = ""
             myEmail = ""
             chatId = ""
@@ -603,7 +749,8 @@ class MainActivity : Activity() {
             }
         }
     }
-        private lateinit var chatScroll: ScrollView
+
+    private lateinit var chatScroll: ScrollView
     private lateinit var messageList: LinearLayout
     private var sendingMessage = false
 
@@ -633,10 +780,7 @@ class MainActivity : Activity() {
 
         chatScroll.addView(
             messageList,
-          LinearLayout.LayoutParams(
-    -1,
-    -2
-)
+            LinearLayout.LayoutParams(-1, -2)
         )
 
         page.addView(
